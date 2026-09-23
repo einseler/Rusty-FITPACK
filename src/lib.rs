@@ -269,7 +269,16 @@ pub fn splev(t: Vec<f64>, c: Vec<f64>, k: usize, x: Vec<f64>, e: usize) -> Vec<f
 ///  ----------
 ///    `y`    : the value of s(x) at the point x.<br>
 ///
+///  Outside the support $[t_k, t_{n-k-1}]$ the spline is continued with the value at the
+///  nearest end ([`Extrapolation::Clamp`]); use [`splev_uniform_ext`] for other choices.
+///
 pub fn splev_uniform(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64) -> f64 {
+    splev_uniform_clamped(t, c, k, x)
+}
+
+/// Evaluation kernel of [`splev_uniform`]: arguments outside the support are clamped to the
+/// nearest end of the support.
+fn splev_uniform_clamped(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64) -> f64 {
     let k1: usize = k + 1;
     let nk1: usize = t.len() - k1;
     let tb: f64 = t[k1 - 1];
@@ -479,7 +488,19 @@ pub fn splder(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: &Vec<f64>, nu: usize) -> 
 ///   $t(k+1) <= x(i) <= x(i+1) <= t(n-k)$ with  $i = 1, 2,...,m-1$<br> <br>
 ///   $ 0 <= \nu <= k$
 ///
+///  Outside the support $[t_k, t_{n-k-1}]$ the argument is clamped to the nearest end, i.e. the
+///  one-sided derivative at that end is returned. This behaviour is kept for backward
+///  compatibility, but it is *not* the derivative of the constant continuation returned by
+///  [`splev_uniform`] there. Use [`splder_uniform_ext`] together with [`splev_uniform_ext`]
+///  for values and derivatives that are consistent outside the support.
+///
 pub fn splder_uniform(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64, nu: usize) -> f64 {
+    splder_uniform_clamped(t, c, k, x, nu)
+}
+
+/// Evaluation kernel of [`splder_uniform`]. Arguments outside the support are clamped to the
+/// nearest end, which yields the one-sided derivative at that end.
+fn splder_uniform_clamped(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64, nu: usize) -> f64 {
     //  before starting computations a data check is made. if the input data
     //  are invalid control is immediately repassed to the calling program.
     assert!(
@@ -569,6 +590,139 @@ pub fn splder_uniform(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64, nu: usize) -
     }
 
     return y;
+}
+
+
+/// Continuation of a spline outside its support $[t_k, t_{n-k-1}]$, used by
+/// [`splev_uniform_ext`] and [`splder_uniform_ext`]. Values and derivatives are always consistent,
+/// i.e. the derivative functions return the derivatives of the continued function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Extrapolation {
+    /// Constant continuation with the value at the nearest end of the support (the values of
+    /// [`splev_uniform`]); all derivatives vanish outside the support (unlike the legacy
+    /// [`splder_uniform`], which returns the one-sided derivative at the nearest end).
+    Clamp,
+    /// The spline and all its derivatives vanish outside the support.
+    Zero,
+    /// Below the support like [`Extrapolation::Clamp`]. Above the upper end $t_e$ the spline is
+    /// continued by the quintic polynomial that matches value, first and second derivative at
+    /// $t_e$ and reaches zero with vanishing first and second derivative at $t_e + w$
+    /// ($w$ = the given width, $w > 0$); beyond $t_e + w$ the continuation is zero. The result is
+    /// twice continuously differentiable. This is the usual way to let tabulated integrals decay
+    /// beyond the end of their grid.
+    SmoothDecay(f64),
+}
+
+/// Support $[t_k, t_{n-k-1}]$ of a spline of degree `k` with knots `t`.
+pub fn spline_support(t: &Vec<f64>, k: usize) -> (f64, f64) {
+    (t[k], t[t.len() - k - 1])
+}
+
+/// Coefficients (A, B, C) of the smooth decay f(u) = A s^3 + B s^4 + C s^5 with s = 1 - u / w,
+/// u = x - t_e, that matches f(0) = y0, f'(0) = y1, f''(0) = y2 and vanishes together with its
+/// first and second derivative at u = w.
+fn smooth_decay_coefficients(y0: f64, y1: f64, y2: f64, w: f64) -> (f64, f64, f64) {
+    let a: f64 = 10.0 * y0 + 4.0 * y1 * w + 0.5 * y2 * w * w;
+    let b: f64 = -15.0 * y0 - 7.0 * y1 * w - y2 * w * w;
+    let c: f64 = 6.0 * y0 + 3.0 * y1 * w + 0.5 * y2 * w * w;
+    (a, b, c)
+}
+
+/// Derivative of order `nu` (with respect to x) of the smooth decay continuation at u = x - t_e.
+fn smooth_decay_eval(t: &Vec<f64>, c: &Vec<f64>, k: usize, u: f64, w: f64, nu: usize) -> f64 {
+    assert!(w > 0.0, "The width of the smooth decay has to be positive");
+    if u >= w {
+        return 0.0;
+    }
+    let (_, te) = spline_support(t, k);
+    let y0: f64 = splev_uniform_clamped(t, c, k, te);
+    let y1: f64 = if k >= 1 { splder_uniform_clamped(t, c, k, te, 1) } else { 0.0 };
+    let y2: f64 = if k >= 2 { splder_uniform_clamped(t, c, k, te, 2) } else { 0.0 };
+    let (pa, pb, pc) = smooth_decay_coefficients(y0, y1, y2, w);
+    // polynomial in s = 1 - u / w with coefficients of s^3, s^4, s^5; d/dx = -(1/w) d/ds
+    let s: f64 = 1.0 - u / w;
+    let coeffs: [(f64, i32); 3] = [(pa, 3), (pb, 4), (pc, 5)];
+    let mut val: f64 = 0.0;
+    for &(coef, power) in coeffs.iter() {
+        if (nu as i32) > power {
+            continue;
+        }
+        // d^nu/ds^nu s^p = p! / (p - nu)! s^(p - nu)
+        let mut fac: f64 = 1.0;
+        for j in 0..nu as i32 {
+            fac *= (power - j) as f64;
+        }
+        val += coef * fac * s.powi(power - nu as i32);
+    }
+    val * (-1.0 / w).powi(nu as i32)
+}
+
+/// Evaluates a spline with uniformly spaced knots like [`splev_uniform`], with an explicit choice
+/// of the continuation outside the support (see [`Extrapolation`]).
+///
+/// #### Example
+/// ```
+/// use rusty_fitpack::{splrep, splev_uniform_ext, splder_uniform_ext, Extrapolation};
+/// let x: Vec<f64> = (0..11).map(|i| i as f64).collect();
+/// let y: Vec<f64> = x.iter().map(|v| (-v).exp()).collect();
+/// let (t, c, k) = splrep(x, y, None, None, None, None, None, None, None, None, None, None);
+/// let ext = Extrapolation::SmoothDecay(1.0);
+/// // inside the support the spline is unchanged, beyond 10 + 1 it vanishes
+/// let v = splev_uniform_ext(&t, &c, k, 12.0, ext);
+/// let d = splder_uniform_ext(&t, &c, k, 10.5, 1, ext);
+/// assert_eq!(v, 0.0);
+/// assert!(d < 0.0);
+/// ```
+pub fn splev_uniform_ext(
+    t: &Vec<f64>,
+    c: &Vec<f64>,
+    k: usize,
+    x: f64,
+    ext: Extrapolation,
+) -> f64 {
+    let (tb, te) = spline_support(t, k);
+    if x < tb {
+        match ext {
+            Extrapolation::Zero => 0.0,
+            _ => splev_uniform_clamped(t, c, k, tb),
+        }
+    } else if x > te {
+        match ext {
+            Extrapolation::Clamp => splev_uniform_clamped(t, c, k, te),
+            Extrapolation::Zero => 0.0,
+            Extrapolation::SmoothDecay(w) => smooth_decay_eval(t, c, k, x - te, w, 0),
+        }
+    } else {
+        splev_uniform_clamped(t, c, k, x)
+    }
+}
+
+/// Evaluates the derivative of order `nu` of a spline with uniformly spaced knots like
+/// [`splder_uniform`], with an explicit choice of the continuation outside the support (see
+/// [`Extrapolation`]). The result is the derivative of [`splev_uniform_ext`] with the same
+/// `ext`. Inside the support $0 <= \nu <= k$ is required; outside, any order is allowed.
+pub fn splder_uniform_ext(
+    t: &Vec<f64>,
+    c: &Vec<f64>,
+    k: usize,
+    x: f64,
+    nu: usize,
+    ext: Extrapolation,
+) -> f64 {
+    if nu == 0 {
+        return splev_uniform_ext(t, c, k, x, ext);
+    }
+    let (tb, te) = spline_support(t, k);
+    if x < tb {
+        0.0
+    } else if x > te {
+        match ext {
+            Extrapolation::Clamp | Extrapolation::Zero => 0.0,
+            Extrapolation::SmoothDecay(w) => smooth_decay_eval(t, c, k, x - te, w, nu),
+        }
+    } else {
+        splder_uniform_clamped(t, c, k, x, nu)
+    }
 }
 
 #[cfg(test)]
@@ -1057,5 +1211,175 @@ mod tests {
             119.00000000000000,
         ];
         assert_eq!(y_ev, y_ev_ref);
+    }
+}
+
+#[cfg(test)]
+mod extrapolation_tests {
+    use crate::{
+        spline_support, splder_uniform, splder_uniform_ext, splev_uniform, splev_uniform_ext,
+        splrep, Extrapolation,
+    };
+
+    /// Cubic interpolating spline of a decaying tail on a uniform grid (like a Slater-Koster
+    /// table ending at 10.38 bohr).
+    fn test_spline() -> (Vec<f64>, Vec<f64>, usize) {
+        let x: Vec<f64> = (1..=519).map(|i| 0.02 * i as f64).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|r| (1.0 + r) * (-0.9 * r).exp() * (0.3 * r).cos())
+            .collect();
+        splrep(x, y, None, None, None, None, None, None, None, None, None, None)
+    }
+
+    fn modes() -> [Extrapolation; 4] {
+        [
+            Extrapolation::Clamp,
+            Extrapolation::Zero,
+            Extrapolation::SmoothDecay(1.0),
+            Extrapolation::SmoothDecay(0.3),
+        ]
+    }
+
+    /// Points inside the support, around its end, inside the tail and beyond the tail.
+    fn probe_points() -> Vec<f64> {
+        vec![0.5, 3.33, 7.01, 10.0, 10.3, 10.45, 10.8, 11.2, 11.37, 11.5, 15.6]
+    }
+
+    #[test]
+    fn derivatives_are_consistent_with_values() {
+        let (t, c, k) = test_spline();
+        let h: f64 = 1.0e-5;
+        for ext in modes() {
+            for &x in probe_points().iter() {
+                let fd1: f64 = (splev_uniform_ext(&t, &c, k, x + h, ext)
+                    - splev_uniform_ext(&t, &c, k, x - h, ext))
+                    / (2.0 * h);
+                let d1: f64 = splder_uniform_ext(&t, &c, k, x, 1, ext);
+                let fd2: f64 = (splder_uniform_ext(&t, &c, k, x + h, 1, ext)
+                    - splder_uniform_ext(&t, &c, k, x - h, 1, ext))
+                    / (2.0 * h);
+                let d2: f64 = splder_uniform_ext(&t, &c, k, x, 2, ext);
+                assert!(
+                    (fd1 - d1).abs() < 1.0e-8,
+                    "{:?} x = {}: first derivative {:e} vs finite difference {:e}",
+                    ext,
+                    x,
+                    d1,
+                    fd1
+                );
+                // knots are only C^1 in the second derivative of a cubic spline: skip them
+                let (_, te) = spline_support(&t, k);
+                if (x - te).abs() > 2.0 * h {
+                    assert!(
+                        (fd2 - d2).abs() < 1.0e-5,
+                        "{:?} x = {}: second derivative {:e} vs finite difference {:e}",
+                        ext,
+                        x,
+                        d2,
+                        fd2
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn smooth_decay_is_twice_continuously_differentiable() {
+        let (t, c, k) = test_spline();
+        let (_, te) = spline_support(&t, k);
+        for w in [1.0, 0.3] {
+            let ext = Extrapolation::SmoothDecay(w);
+            for nu in 0..3 {
+                let inside: f64 = splder_uniform_ext(&t, &c, k, te, nu, ext);
+                let outside: f64 = splder_uniform_ext(&t, &c, k, te + 1.0e-12, nu, ext);
+                assert!(
+                    (inside - outside).abs() < 1.0e-8 * (1.0 + inside.abs()),
+                    "w = {}, derivative {}: {:e} (inside) vs {:e} (outside)",
+                    w,
+                    nu,
+                    inside,
+                    outside
+                );
+                // the continuation vanishes smoothly at te + w: close to the end the derivative
+                // of order nu decays like (te + w - x)^(3 - nu)
+                let end: f64 = splder_uniform_ext(&t, &c, k, te + w - 1.0e-9, nu, ext);
+                let tol: f64 = [1.0e-20, 1.0e-12, 1.0e-8][nu];
+                assert!(end.abs() < tol, "w = {}, derivative {} at te + w: {:e}", w, nu, end);
+                assert_eq!(splder_uniform_ext(&t, &c, k, te + w, nu, ext), 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_functions_are_unchanged_and_ext_matches_inside() {
+        let (t, c, k) = test_spline();
+        let (tb, te) = spline_support(&t, k);
+        for &x in probe_points().iter() {
+            let v: f64 = splev_uniform(&t, &c, k, x);
+            let d: f64 = splder_uniform(&t, &c, k, x, 1);
+            // the Clamp continuation reproduces the legacy values everywhere
+            assert_eq!(v, splev_uniform_ext(&t, &c, k, x, Extrapolation::Clamp));
+            if x > te {
+                // legacy behaviour outside the support: clamped value, one-sided derivative
+                assert_eq!(v, splev_uniform(&t, &c, k, te));
+                assert_eq!(d, splder_uniform(&t, &c, k, te, 1));
+                assert_eq!(splder_uniform_ext(&t, &c, k, x, 1, Extrapolation::Clamp), 0.0);
+            } else {
+                // inside the support every continuation gives the plain spline
+                for ext in modes() {
+                    assert_eq!(v, splev_uniform_ext(&t, &c, k, x, ext));
+                    assert_eq!(d, splder_uniform_ext(&t, &c, k, x, 1, ext));
+                }
+            }
+        }
+        assert_eq!(splder_uniform(&t, &c, k, tb - 0.01, 1), splder_uniform(&t, &c, k, tb, 1));
+        assert_eq!(splev_uniform_ext(&t, &c, k, te + 0.5, Extrapolation::Zero), 0.0);
+    }
+
+    /// The legacy functions must give bit-identical results to the original implementation
+    /// (version 0.1.2), reproduced here verbatim for a few points.
+    #[test]
+    fn legacy_functions_match_original_implementation() {
+        let (t, c, k) = test_spline();
+        for &x in probe_points().iter().chain([0.0, 0.01, 20.0].iter()) {
+            assert_eq!(splev_uniform(&t, &c, k, x), original_splev_uniform(&t, &c, k, x));
+        }
+    }
+
+    /// Verbatim copy of `splev_uniform` from version 0.1.2.
+    fn original_splev_uniform(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64) -> f64 {
+        let k1: usize = k + 1;
+        let nk1: usize = t.len() - k1;
+        let tb: f64 = t[k1 - 1];
+        let te: f64 = t[nk1];
+        let mut l: usize = 0;
+        let arg: f64;
+        if x <= tb {
+            arg = tb;
+            l = k1;
+        } else if x >= te {
+            arg = te;
+            l = nk1;
+        } else {
+            arg = x;
+            let dt: f64 = t[k1 + 1] - t[k1];
+            if dt != 0.0 {
+                l = ((x - t[0]) / dt) as usize + k;
+            }
+        }
+        if l <= k {
+            l = k1;
+        } else if l > nk1 {
+            l = nk1;
+        }
+        let h: Vec<f64> = crate::fpbspl::fpbspl(arg, &t, k, l);
+        let mut y: f64 = 0.0;
+        let mut ll: usize = l - k1;
+        for j in 1..(k1 + 1) {
+            ll = ll + 1;
+            y = y + c[ll - 1] * h[j - 1];
+        }
+        y
     }
 }

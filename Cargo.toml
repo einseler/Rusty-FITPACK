@@ -1,6 +1,6 @@
 [package]
 name = "rusty-fitpack"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["Joscha Hoche joscha.hoche@uni-wuerzburg.de"]
 edition = "2021"
 repository = "https://github.com/mitric-lab/Rusty-FITPACK"
