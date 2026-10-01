@@ -549,7 +549,7 @@ fn splder_uniform_clamped(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64, nu: usiz
                 l += 1;
                 j += 1;
             }
-            y = wrk[j - 1]
+            y = wrk[j]
         }
     }
     l = k1;
