@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Regression coverage for scalar uniform spline values and derivatives across degrees 1–5,
+  shifted grids, knot boundaries, the first grid interval and extrapolation policies.
+
+### Fixed
+- Correct interval selection for scalar uniform spline values, including multi-interval
+  linear and clamped cubic splines.
+- Prevent index underflow when evaluating scalar cubic derivatives in the first grid interval.
+- Correct coefficient indexing for scalar highest-order derivatives, including the first
+  derivative of a linear spline.
+
 ## Rusty-Fitpack 0.1.3 (2026-09-23)
 
 ### Added

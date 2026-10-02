@@ -276,6 +276,21 @@ pub fn splev_uniform(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64) -> f64 {
     splev_uniform_clamped(t, c, k, x)
 }
 
+// The first interior knot depends on degree and endpoint multiplicity, so the
+// uniform-grid estimate must be checked against the actual knot bounds.
+fn correct_uniform_interval(t: &[f64], k: usize, x: f64, l: usize) -> usize {
+    let first = k + 1;
+    let last = t.len() - first;
+    let mut l = l.clamp(first, last);
+    while l > first && x < t[l - 1] {
+        l -= 1;
+    }
+    while l < last && x >= t[l] {
+        l += 1;
+    }
+    l
+}
+
 /// Evaluation kernel of [`splev_uniform`]: arguments outside the support are clamped to the
 /// nearest end of the support.
 fn splev_uniform_clamped(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64) -> f64 {
@@ -301,12 +316,7 @@ fn splev_uniform_clamped(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64) -> f64 {
             l = ((x - t[0]) / dt) as usize + k;
         }
     }
-    // If l < k, we divide by zero because the interpolating points t[0..k] = 0.0
-    if l <= k {
-        l = k1;
-    } else if l > nk1 {
-        l = nk1;
-    }
+    l = correct_uniform_interval(t, k, arg, l);
     // evaluate the non-zero b-splines at arg
     let h: Vec<f64> = fpbspl(arg, &t, k, l);
     // find the value of s(x) at x = arg
@@ -571,12 +581,7 @@ fn splder_uniform_clamped(t: &Vec<f64>, c: &Vec<f64>, k: usize, x: f64, nu: usiz
                 l = ((x - t[0]) / dt) as usize + k;
             }
         }
-        // If l < k, we divide by zero because the interpolating points t[0..k] = 0.0
-        if l <= kk {
-            l = k1 - nu;
-        } else if l > nk1 {
-            l = nk1;
-        }
+        l = correct_uniform_interval(t, k, arg, l);
         // evaluate the non-zero b-splines at arg
         let h: Vec<f64> = fpbspl(arg, &t, kk, l);
         // find the value of the derivative at x=arg
